@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Neon Runner v2</title>
+    <style>
+        body {
+            margin: 0;
+            background: #050505;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            border: 2px solid #333;
+            box-shadow: 0 0 20px #0ff;
+            background: #000;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="450"></canvas>
+
+<script>
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- CONFIG ---
+const INITIAL_SPEED = 6;
+let currentBaseSpeed = INITIAL_SPEED; // Increases with difficulty
+let GAME_SPEED = 6;
+let GRAVITY = 0.6;
+const BASE_GRAVITY = 0.6;
+const JUMP_FORCE = -11;
+
+// --- STATE ---
+let frame = 0;
+let score = 0;
+let difficultyLevel = 0;
+let isGameOver = false;
+let isPaused = false;
+let hazardTimer = 0;
+let hazardMaxTime = 0;
+let hazardType = null; // 'gravity', 'fast', 'dense', 'shift'
+let timeSinceHazard = 0;
+let messageTimer = 0; // For "Hazard Survived" text
+
+// --- INPUT ---
+const keys = {
+    Space: false,
+    KeyZ: false,
+    KeyX: false,
+    KeyC: false,
+    KeyV: false
+};
+
+// --- SKILLS ---
+const skills = {
+    doubleJump: 0, 
+    dash: 0,       
+    float: 0,      
+    dive: 0,       
+    shield: false, 
+    slowTime: 0    
+};
+
+// --- RUNTIME VARS ---
+let canDash = true;
+let dashTimer = 0;
+let floatTimer = 0;
+let slowTimer = 0;
+let shieldActive = false;
+let bgOffset = 0; // For scrolling backgrounds
+
+// --- ENTITIES ---
+let player;
+let obstacles = [];
+let particles = [];
+let upgradeOptions = [];
+
+// --- CLASSES ---
+class Player {
+    constructor() {
+        this.w = 30;
+        this.h = 30;
+        this.x = 100;
+        this.y = 300;
+        this.vy = 0;
+        this.onGround = false;
+        this.jumpCount = 0;
+        this.color = '#0ff';
+        this.dashActive = false;
+        this.isDiving = false;
+    }
+
+    update() {
+        if (!this.dashActive) {
+            // Float Skill
+            if (skills.float > 0 && keys.KeyX && this.vy > 0) {
+                let limit = skills.float === 2 ? 120 : 60;
+                if (floatTimer < limit) {
+                    this.vy = 0.5 * (GRAVITY > 0 ? 1 : -1); 
+                    floatTimer++;
+                    createParticle(this.x, this.y + this.h, '#fff');
+                } else {
+                    this.vy += GRAVITY;
+                }
+            } 
+            // Dive Skill
+            else if (skills.dive > 0 && keys.KeyC && !this.onGround) {
+                this.vy = (GRAVITY > 0 ? 20 : -20);
+                this.isDiving = true;
+                createParticle(this.x + this.w/2, this.y, '#f00');
+            }
+            else {
+                this.vy += GRAVITY;
+                this.isDiving = false;
+            }
+        }
+
+        this.y += this.vy;
+
+        // Collision with floor/ceiling
+        if (GRAVITY > 0) {
+            if (this.y + this.h > canvas.height - 20) {
+                this.y = canvas.height - 20 - this.h;
+                this.vy = 0;
+                this.onGround = true;
+                this.jumpCount = 0;
+                floatTimer = 0;
+            } else {
+                this.onGround = false;
+            }
+        } else {
+            if (this.y < 20) {
+                this.y = 20;
+                this.vy = 0;
+                this.onGround = true;
+                this.jumpCount = 0;
+                floatTimer = 0;
+            } else {
+                this.onGround = false;
+            }
+        }
+
+        // Dash Logic
+        if (this.dashActive) {
+            dashTimer--;
+            if (dashTimer <= 0) {
+                this.dashActive = false;
+                this.vy = 0;
+            }
+        }
+    }
+
+    jump() {
+        let maxJumps = 1;
+        if (skills.doubleJump === 1) maxJumps = 2;
+        if (skills.doubleJump === 2) maxJumps = 3;
+
+        if (this.jumpCount < maxJumps) {
+            this.vy = (GRAVITY > 0 ? JUMP_FORCE : -JUMP_FORCE);
+            this.jumpCount++;
+            this.onGround = false;
+            for(let i=0; i<5; i++) createParticle(this.x + this.w/2, this.y + this.h, '#0ff');
+        }
+    }
+
+    dash() {
+        if (skills.dash > 0 && canDash && !this.dashActive) {
+            this.dashActive = true;
+            canDash = false;
+            let duration = skills.dash === 2 ? 25 : 15;
+            dashTimer = duration;
+            this.vy = 0; 
+            setTimeout(() => { canDash = true; }, skills.dash === 2 ? 600 : 1000);
+        }
+    }
+
+    draw() {
+        ctx.save();
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = this.color;
+        ctx.fillStyle = this.color;
+        
+        // Shield Visual
+        if (shieldActive) {
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.strokeRect(this.x - 5, this.y - 5, this.w + 10, this.h + 10);
+        }
+
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+        
+        // Eyes to show orientation
+        ctx.fillStyle = '#000';
+        if (GRAVITY > 0) {
+            ctx.fillRect(this.x + 18, this.y + 5, 8, 8);
+        } else {
+            ctx.fillRect(this.x + 18, this.y + 17, 8, 8);
+        }
+        
+        ctx.restore();
+    }
+}
+
+class Obstacle {
+    constructor(x, type) {
+        this.x = x;
+        this.w = 30 + Math.random() * 20;
+        this.h = 30 + Math.random() * 40;
+        this.type = type; // 0: Block, 1: Hover
+        this.markedForDeletion = false;
+        
+        if (GRAVITY > 0) {
+            this.y = canvas.height - 20 - this.h;
+            if (type === 1) this.y -= 50; 
+        } else {
+            this.y = 20;
+            if (type === 1) this.y += 50;
+        }
+
+        if (hazardType === 'shift') {
+            this.baseY = this.y;
+            this.offset = Math.random() * 100;
+        }
+    }
+
+    update() {
+        this.x -= GAME_SPEED;
+        if (this.x + this.w < 0) this.markedForDeletion = true;
+
+        if (hazardType === 'shift') {
+            // Wavy motion
+            this.y = this.baseY + Math.sin((frame + this.offset) * 0.05) * 40;
+        }
+    }
+
+    draw() {
+        ctx.save();
+        ctx.shadowBlur = 10;
+        ctx.shadowColor = '#f0f';
+        ctx.fillStyle = '#f0f';
+        ctx.fillRect(this.x, this.y, this.w, this.h);
+        ctx.restore();
+    }
+}
+
+class Particle {
+    constructor(x, y, color) {
+        this.x = x;
+        this.y = y;
+        this.vx = (Math.random() - 0.5) * 5;
+        this.vy = (Math.random() - 0.5) * 5;
+        this.life = 30;
+        this.color = color;
+    }
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life--;
+    }
+    draw() {
+        ctx.fillStyle = this.color;
+        ctx.globalAlpha = this.life / 30;
+        ctx.fillRect(this.x, this.y, 4, 4);
+        ctx.globalAlpha = 1;
+    }
+}
+
+function createParticle(x, y, color) {
+    particles.push(new Particle(x, y, color));
+}
+
+// --- GAME LOGIC ---
+
+function triggerHazard() {
+    const types = ['gravity', 'fast', 'dense', 'shift'];
+    hazardType = types[Math.floor(Math.random() * types.length)];
+    hazardTimer = 600; 
+    hazardMaxTime = 600;
+    
+    if (hazardType === 'gravity') GRAVITY = -BASE_GRAVITY; 
+}
+
+function endHazard() {
+    hazardType = null;
+    hazardTimer = 0;
+    GRAVITY = BASE_GRAVITY;
+    messageTimer = 120; // Show 'Success' for 2 seconds
+    generateUpgrades();
+    isPaused = true;
+}
+
+function generateUpgrades() {
+    upgradeOptions = [];
+    const pool = [
+        { id: 'doubleJump', txt: "Double Jump" },
+        { id: 'dash', txt: "Mid-air Dash" },
+        { id: 'float', txt: "Float (Hold X)" },
+        { id: 'dive', txt: "Dive (Hold C)" },
+        { id: 'shield', txt: "Shield (One-time)" },
+        { id: 'slowTime', txt: "Slow Time (Press V)" }
+    ];
+
+    while(upgradeOptions.length < 3) {
+        let r = pool[Math.floor(Math.random() * pool.length)];
+        if (!upgradeOptions.includes(r)) {
+            if (r.id === 'shield' && skills.shield) continue; 
+            if (typeof skills[r.id] === 'number' && skills[r.id] >= 2) continue;
+            upgradeOptions.push(r);
+        }
+    }
+}
+
+function selectUpgrade(index) {
+    let choice = upgradeOptions[index];
+    if (!choice) return;
+
+    if (choice.id === 'shield') {
+        skills.shield = true;
+        shieldActive = true;
+    } else {
+        skills[choice.id]++;
+    }
+
+    isPaused = false;
+    timeSinceHazard = 0;
+    upgradeOptions = [];
+}
+
+// --- VISUALS ---
+
+function drawHazardVisuals() {
+    ctx.save();
+    
+    // 1. Gravity - Draw Up Arrows in Background
+    if (hazardType === 'gravity') {
+        ctx.fillStyle = 'rgba(100, 0, 255, 0.1)';
+        ctx.font = '50px Arial';
+        let offset = (frame * 2) % 100;
+        for (let i = 0; i < canvas.width; i += 100) {
+            for (let j = 0; j < canvas.height; j += 100) {
+                ctx.fillText('↑', i, j - offset + 100);
+            }
+        }
+    }
+    
+    // 2. Fast - Draw Speed Lines
+    if (hazardType === 'fast') {
+        ctx.strokeStyle = 'rgba(0, 255, 255, 0.2)';
+        ctx.lineWidth = 2;
+        for(let i=0; i<5; i++) {
+            let y = Math.random() * canvas.height;
+            let len = Math.random() * 200 + 50;
+            let x = Math.random() * canvas.width;
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(x - len, y);
+            ctx.stroke();
+        }
+    }
+
+    // 3. Dense - Warning stripes on floor
+    if (hazardType === 'dense') {
+        let offset = (frame * 2) % 40;
+        ctx.fillStyle = `rgba(255, 0, 0, ${Math.abs(Math.sin(frame/10)) * 0.3})`;
+        ctx.fillRect(0, 0, canvas.width, 20); // Ceiling
+        ctx.fillRect(0, canvas.height-20, canvas.width, 20); // Floor
+    }
+
+    // 4. Shift - Wavy grid
+    if (hazardType === 'shift') {
+        ctx.strokeStyle = 'rgba(0, 255, 0, 0.1)';
+        ctx.beginPath();
+        for (let x = 0; x < canvas.width; x += 40) {
+            ctx.moveTo(x, 0);
+            for(let y = 0; y < canvas.height; y += 10) {
+                 ctx.lineTo(x + Math.sin((frame + y) * 0.05)*10, y);
+            }
+        }
+        ctx.stroke();
+    }
+
+    ctx.restore();
+}
+
+function drawUI() {
+    // Score
+    ctx.font = '24px Courier New';
+    ctx.fillStyle = '#fff';
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = '#0f0';
+    ctx.textAlign = 'left';
+    ctx.fillText(`SCORE: ${score}`, 20, 40);
+    ctx.shadowBlur = 0;
+
+    // Controls Help
+    ctx.font = '12px Courier New';
+    ctx.fillStyle = '#888';
+    ctx.fillText("SPACE: Jump | Z: Dash | X: Float | C: Dive | V: Slow", 20, 65);
+
+    // Hazard UI
+    if (hazardType) {
+        // Label
+        ctx.font = 'bold 30px Courier New';
+        ctx.fillStyle = '#f0f';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#f0f';
+        ctx.textAlign = 'center';
+        let label = hazardType.toUpperCase() + " HAZARD";
+        if (hazardType === 'gravity') label = "GRAVITY REVERSE";
+        else if (hazardType === 'fast') label = "SPEED SURGE";
+        else if (hazardType === 'dense') label = "OBSTACLE SWARM";
+        else if (hazardType === 'shift') label = "REALITY SHIFT";
+        
+        // Blink effect
+        if (Math.floor(frame / 20) % 2 === 0) {
+            ctx.fillText(label, canvas.width/2, 50);
+        }
+
+        // Timer Bar
+        let barWidth = 400;
+        let pct = hazardTimer / hazardMaxTime;
+        ctx.fillStyle = '#333';
+        ctx.fillRect(canvas.width/2 - barWidth/2, 70, barWidth, 10);
+        ctx.fillStyle = '#f0f';
+        ctx.fillRect(canvas.width/2 - barWidth/2, 70, barWidth * pct, 10);
+        
+    } else if (messageTimer > 0) {
+        ctx.font = '30px Courier New';
+        ctx.fillStyle = '#0f0';
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#0f0';
+        ctx.textAlign = 'center';
+        ctx.fillText("HAZARD SURVIVED!", canvas.width/2, 50);
+        messageTimer--;
+    }
+}
+
+// --- MAIN LOOP ---
+
+function init() {
+    score = 0;
+    difficultyLevel = 0;
+    currentBaseSpeed = INITIAL_SPEED;
+    isGameOver = false;
+    isPaused = false;
+    frame = 0;
+    timeSinceHazard = 0;
+    hazardType = null;
+    GRAVITY = BASE_GRAVITY;
+    
+    skills.doubleJump = 0;
+    skills.dash = 0;
+    skills.float = 0;
+    skills.dive = 0;
+    skills.shield = false;
+    skills.slowTime = 0;
+    shieldActive = false;
+
+    player = new Player();
+    obstacles = [];
+    particles = [];
+    
+    animate();
+}
+
+function animate() {
+    if (isGameOver) return;
+    if (isPaused) {
+        drawUpgradeMenu();
+        requestAnimationFrame(animate);
+        return;
+    }
+
+    // Difficulty Scaling
+    // Every 500 points, increase difficulty level
+    let newLevel = Math.floor(score / 500);
+    if (newLevel > difficultyLevel) {
+        difficultyLevel = newLevel;
+        currentBaseSpeed += 0.5; // Slightly faster base speed
+    }
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    drawHazardVisuals();
+
+    // Speed Control
+    if (hazardType) {
+        hazardTimer--;
+        if (hazardType === 'fast') GAME_SPEED = currentBaseSpeed + 4; // Much faster
+        else if (skills.slowTime > 0 && keys.KeyV && slowTimer > 0) GAME_SPEED = 2;
+        else GAME_SPEED = currentBaseSpeed;
+
+        if (hazardTimer <= 0) endHazard();
+    } else {
+        GAME_SPEED = currentBaseSpeed;
+        if (skills.slowTime > 0 && keys.KeyV && slowTimer > 0) {
+            GAME_SPEED = 2;
+            slowTimer--;
+        } else {
+            if (slowTimer < (skills.slowTime * 100)) slowTimer++; 
+        }
+
+        timeSinceHazard++;
+        if (timeSinceHazard > 500) triggerHazard(); 
+    }
+
+    // Logic Steps
+    frame++;
+    score++;
+    
+    // Spawning Logic (faster spawn based on speed)
+    // Formula: The faster we go, the more often we need to check, but let's keep it simple
+    // Reduce spawn interval as difficulty goes up
+    let baseSpawnRate = 90 - (difficultyLevel * 5);
+    if (baseSpawnRate < 40) baseSpawnRate = 40;
+    
+    let spawnRate = hazardType === 'dense' ? Math.floor(baseSpawnRate / 2) : baseSpawnRate;
+    
+    if (frame % spawnRate === 0) {
+        obstacles.push(new Obstacle(canvas.width, Math.random() > 0.5 ? 1 : 0));
+    }
+
+    player.update();
+    player.draw();
+
+    obstacles.forEach((obs, index) => {
+        obs.update();
+        obs.draw();
+        if (obs.markedForDeletion) obstacles.splice(index, 1);
+
+        // AABB Collision
+        if (
+            player.x < obs.x + obs.w &&
+            player.x + player.w > obs.x &&
+            player.y < obs.y + obs.h &&
+            player.y + player.h > obs.y
+        ) {
+            if (skills.dive === 2 && player.isDiving) {
+                obs.markedForDeletion = true;
+                for(let i=0; i<10; i++) createParticle(obs.x, obs.y, '#ff0');
+                score += 100;
+            } 
+            else if (shieldActive) {
+                shieldActive = false;
+                skills.shield = false;
+                obs.markedForDeletion = true;
+                // Visual feedback for shield break
+                for(let i=0; i<20; i++) createParticle(player.x, player.y, '#fff');
+            }
+            else {
+                isGameOver = true;
+                drawGameOver();
+            }
+        }
+    });
+
+    particles.forEach((p, i) => {
+        p.update();
+        p.draw();
+        if (p.life <= 0) particles.splice(i, 1);
+    });
+
+    // Floor/Ceiling
+    ctx.fillStyle = '#333';
+    ctx.fillRect(0, canvas.height-20, canvas.width, 20);
+    ctx.fillRect(0, 0, canvas.width, 20);
+
+    drawUI();
+
+    if (!isGameOver) requestAnimationFrame(animate);
+}
+
+// --- MENUS ---
+
+function drawUpgradeMenu() {
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.fillStyle = '#fff';
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = '#fff';
+    ctx.font = '30px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText("HAZARD CLEARED", canvas.width/2, 80);
+    ctx.font = '20px Courier New';
+    ctx.fillText("Select an Augmentation", canvas.width/2, 110);
+    ctx.shadowBlur = 0;
+
+    upgradeOptions.forEach((opt, i) => {
+        let x = canvas.width/2 - 250 + (i * 170);
+        let y = 160;
+        
+        ctx.strokeStyle = '#0ff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, 150, 200);
+        
+        ctx.fillStyle = '#0ff';
+        ctx.font = '16px Courier New';
+        
+        let words = opt.txt.split(" ");
+        words.forEach((w, line) => {
+            ctx.fillText(w, x + 75, y + 80 + (line*20));
+        });
+
+        // Current Level
+        let lvl = skills[opt.id];
+        if (opt.id !== 'shield') {
+            let txt = lvl === 0 ? "UNLOCK" : "UPGRADE MAX";
+            if (lvl === 1) txt = "UPGRADE";
+            ctx.fillStyle = '#ff0';
+            ctx.fillText(txt, x + 75, y + 40);
+        } else {
+            ctx.fillStyle = '#ff0';
+            ctx.fillText("ONE USE", x + 75, y + 40);
+        }
+    });
+}
+
+function drawGameOver() {
+    ctx.fillStyle = 'rgba(0,0,0,0.8)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.fillStyle = '#f00';
+    ctx.shadowBlur = 20;
+    ctx.shadowColor = '#f00';
+    ctx.font = '60px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText("CRASHED", canvas.width/2, 180);
+    
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fff';
+    ctx.font = '30px Courier New';
+    ctx.fillText(`FINAL SCORE: ${score}`, canvas.width/2, 240);
+    
+    ctx.font = '20px Courier New';
+    ctx.fillStyle = '#aaa';
+    ctx.fillText("Click to Reboot System", canvas.width/2, 300);
+}
+
+// --- INPUT LISTENERS ---
+window.addEventListener('keydown', e => {
+    if (keys.hasOwnProperty(e.code)) keys[e.code] = true;
+    if (e.code === 'Space' && !isGameOver && !isPaused) player.jump();
+    if (e.code === 'KeyZ') player.dash();
+});
+
+window.addEventListener('keyup', e => {
+    if (keys.hasOwnProperty(e.code)) keys[e.code] = false;
+});
+
+canvas.addEventListener('mousedown', e => {
+    if (isGameOver) {
+        init();
+        return;
+    }
+    if (isPaused) {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        upgradeOptions.forEach((opt, i) => {
+            let x = canvas.width/2 - 250 + (i * 170);
+            let y = 160;
+            if (mx >= x && mx <= x + 150 && my >= y && my <= y + 200) {
+                selectUpgrade(i);
+            }
+        });
+    }
+});
+
+// Start
+init();
+
+</script>
+</body>
+</html>
